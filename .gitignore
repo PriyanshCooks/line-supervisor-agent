@@ -1,0 +1,33 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+*.pt
+.pytest_cache/
+# data: never commit Bosch files, generated databases, the source video or derived videos/images
+data/bosch/
+data/bosch_sample/
+data/*.db
+data/*.mp4
+data/actions.log
+data/out/
+!data/zones.yaml
+
+# pre-push hardening: never commit any video, model weights, databases, env files or Kaggle data, wherever they live
+*.mp4
+*.avi
+*.mov
+*.db
+*.sqlite
+yolov8n.pt
+data/events.db
+data/bosch/
+data/bosch_sample/
+*.csv.zip
+.venv/
+.env
+!tests/fixtures/bosch_mini/*.csv
+
+# derived caches
+*.pkl
+data/*.visits.pkl

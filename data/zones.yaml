@@ -1,0 +1,34 @@
+# Zones for data/input_stable.mp4 (1920x1080, Pexels "Motorcycle Factory Production Line Overview", 33-50s window).
+# Coordinates were picked on data/out/reference_frame.jpg (t=2s of the trimmed clip). Re-pick them for any other clip:
+#   python -m vision.pipeline --preview   ->  data/out/zones_preview.jpg
+# Stations are the 3 nearest conveyor fixtures, receding from the camera. The blurred foreground hoist/rack is excluded.
+line: CAM1                   # events are written to the shared table as source='vision', line='CAM1', shift='CLIP'
+clip_shift: CLIP             # timestamps are seconds from the start of the trimmed clip, not wall-clock time
+blur_people: true            # Gaussian-blur every detected person in all outputs (detection used only for blurring)
+zone_pad_px: 15             # polygons below are grown outward by this many px (window drifts ~0.7 px/s, ~12 px total)
+piece_mode: transit         # transit = unit enters then leaves a zone (default) | occupancy = legacy YOLO+motion heuristic
+presence:                    # transit mode: engine presence = fraction of dark pixels (V < dark_v) in the zone
+  dark_v: 70
+  enter: 0.22                # presence >= this -> unit arriving
+  leave: 0.18                # presence <= this -> unit gone (hysteresis)
+  min_hold_s: 0.4            # debounce
+  motion_confirm: 0.04       # a transition counts only if >= 4% of zone pixels moved within +-confirm_window_s
+  confirm_window_s: 1.5
+  motion_px_thresh: 14
+model: yolov8n.pt            # occupancy mode only
+tracker: bytetrack.yaml
+motion:                      # occupancy mode only
+  high: 0.060
+  low: 0.020
+  lull_s: 0.8
+  min_cycle_s: 1.5
+stations:
+  - id: S1
+    name: Fixture 1 (near)
+    polygon: [[780, 640], [1100, 640], [1100, 840], [780, 840]]
+  - id: S2
+    name: Fixture 2 (worker)
+    polygon: [[1020, 430], [1250, 430], [1250, 650], [1020, 650]]
+  - id: S3
+    name: Fixture 3 (far)
+    polygon: [[1215, 360], [1310, 360], [1310, 560], [1215, 560]]
