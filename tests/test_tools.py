@@ -107,14 +107,45 @@ def test_find_bottleneck_description_matches_the_queue_based_ranking():
     assert "throughput" in d and "peak queue" in d and "ticks" in d and "refused=true" in d
 
 
-def test_action_request_detector_matches_imperatives_not_questions():
-    from agent.graph import ACTION_REQUEST as R
-    for yes in ("Alert the line lead about station 15 on line 0.", "please flag S7", "Can you escalate this?", "Notify the line lead",
-                "Find the bottleneck and then alert the line lead", "I want you to flag S2"):
-        assert R.search(yes), yes
-    for no in ("Which station should I rebalance on line 0?", "Should I alert the line lead?", "What would you recommend? Just advise me.",
-               "Which stations correlate most with QC failures?"):
-        assert not R.search(no), no
+def test_action_request_policy_yes_and_no_cases():
+    from agent.policy import is_action_request as yes_
+    for yes in ("Alert the line lead about station 15 on line 0.", "Alert the line lead about the bottleneck on line 0 in window W5.",
+                "Flag station S3 for rebalancing.", "please flag S7", "Can you escalate this?", "Could you flag S2 please?", "Notify the line lead",
+                "Find the bottleneck and then alert the line lead", "I want you to flag S2", "What is the bottleneck? Alert the line lead."):
+        assert yes_(yes), yes
+    for no in ("Which station should I rebalance on line 0 in window W5?", "Should I alert the line lead?",
+               "What would you recommend for the worst station on line 0 in window W5? Just advise me.",
+               "Which stations correlate most with QC failures?",
+               # new false-positive classes
+               "Should I rebalance S3 and flag it?", "Flag rate at S3?", "Warn me if S2 is slow", "Alert me when the queue grows",
+               "Do not alert anyone, just tell me the bottleneck", "don't flag S3", "Is it worth flagging S2?", "What is the flag count at S3",
+               "Would you alert the line lead?", "Can I flag S2?"):
+        assert not yes_(no), no
+
+
+def test_extract_action_and_station():
+    from agent.policy import extract_action as ex
+    assert ex("Alert the line lead about station 15 on line 0.") == ("alert_line_lead", "S15")
+    assert ex("Alert the line lead about the bottleneck on line 0 in window W5.") == ("alert_line_lead", None)
+    assert ex("Flag station S3 for rebalancing.") == ("flag_for_rebalancing", "S3")
+    assert ex("please flag S7") == ("flag_for_rebalancing", "S7")
+    assert ex("I want you to flag S2") == ("flag_for_rebalancing", "S2")
+    assert ex("Can you escalate S9?") == ("alert_line_lead", "S9")
+    assert ex("Find the bottleneck and then notify the lead") == ("alert_line_lead", None)
+
+
+def test_policy_verdicts_force_and_block():
+    from agent import policy as P
+    ask, chat = "Alert the line lead about station 15.", "Which station should I rebalance?"
+    assert P.should_force_action(ask, already_proposed=False, reply_has_tool_calls=False)          # answered in prose -> force
+    assert not P.should_force_action(ask, already_proposed=True, reply_has_tool_calls=False)       # already proposed
+    assert not P.should_force_action(ask, already_proposed=False, reply_has_tool_calls=True)       # still gathering data
+    assert not P.should_force_action(chat, already_proposed=False, reply_has_tool_calls=False)
+    assert P.should_block_action(chat, ["find_bottleneck", "propose_action"])
+    assert not P.should_block_action(chat, ["find_bottleneck"])
+    assert not P.should_block_action(ask, ["propose_action"])
+    assert "action='alert_line_lead'" in P.force_nudge(ask) and "station_id='S15'" in P.force_nudge(ask)
+    assert "find_bottleneck" in P.force_nudge("Alert the line lead about the bottleneck.")
 
 
 def test_compare_shifts(mini_db):
