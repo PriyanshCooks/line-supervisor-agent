@@ -124,6 +124,18 @@ def test_action_request_policy_yes_and_no_cases():
         assert not yes_(no), no
 
 
+def test_streamlit_context_prefix_does_not_hide_the_request():
+    """The app sends '[Context: source bosch, line L0, window W5] <question>'; the policy must judge the question itself."""
+    from agent.policy import extract_action, is_action_request
+    ctx = "[Context: source bosch, line L0, window W5] "
+    assert is_action_request(ctx + "Alert the line lead about the bottleneck.")
+    assert is_action_request(ctx + "Flag station S3 for rebalancing.")
+    assert not is_action_request(ctx + "Which station should I rebalance?")
+    assert not is_action_request(ctx + "Do not alert anyone, just tell me the bottleneck")
+    assert extract_action(ctx + "Flag station S3 for rebalancing.") == ("flag_for_rebalancing", "S3")
+    assert extract_action(ctx + "Alert the line lead about the bottleneck.") == ("alert_line_lead", None)
+
+
 def test_extract_action_and_station():
     from agent.policy import extract_action as ex
     assert ex("Alert the line lead about station 15 on line 0.") == ("alert_line_lead", "S15")

@@ -16,8 +16,8 @@ from agent.graph import _tool_text, mcp_client
 from agent.llm import get_llm
 
 
-async def _facts(shift: str, line: str | None, source: str | None) -> dict:
-    tools = {t.name: t for t in await mcp_client().get_tools()}
+async def _facts(shift: str, line: str | None, source: str | None, tools: dict | None = None) -> dict:
+    tools = tools or {t.name: t for t in await mcp_client().get_tools()}      # shared tools = one MCP subprocess for the whole session
 
     async def call(name, **kw):
         return json.loads(_tool_text(await tools[name].ainvoke({k: v for k, v in kw.items() if v is not None})))
@@ -75,8 +75,9 @@ def _template(f: dict, cause_override: str | None = None, action_override: str |
     return wa, md
 
 
-async def generate_report(shift: str, line: str | None = None, source: str | None = None, use_llm: bool = True) -> dict:
-    f = await _facts(shift, line, source)
+async def generate_report(shift: str, line: str | None = None, source: str | None = None, use_llm: bool = True,
+                          tools: dict | None = None) -> dict:
+    f = await _facts(shift, line, source, tools)
     if "error" in f:
         return {"whatsapp": f"Cannot build report: {f['error']}", "markdown": json.dumps(f["error"], indent=1), "facts": f}
     wa, md = _template(f)

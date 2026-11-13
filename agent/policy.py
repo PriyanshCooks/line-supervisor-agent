@@ -31,6 +31,12 @@ _NEGATED = re.compile(rf"\b(?:don'?t|do not|never|no need to|without|not)\b(?:\s
 _STATION = re.compile(r"\bstation\s*S?(\d+)\b|\bS(\d+)\b", re.I)
 
 
+def _clean(text: str) -> str:
+    """Drop the '[Context: source bosch, line L0, window W5]' prefix the Streamlit app puts in front of every question; the
+    imperative checks anchor at the start of the message, so with the prefix every alert request looked like a non-request."""
+    return re.sub(r"^\s*\[[^\]]*\]\s*", "", text or "")
+
+
 def _is_question(sentence: str) -> bool:
     s = sentence.strip()
     return s.endswith("?") or bool(_QUESTION_START.match(s))
@@ -38,6 +44,7 @@ def _is_question(sentence: str) -> bool:
 
 def _request_match(text: str):
     """The verb match of the first imperative alert/flag sentence in `text`, or None."""
+    text = _clean(text)
     if _NEGATED.search(text):
         return None
     for sentence in re.split(r"(?<=[.!?])\s+|\n+", text.strip()):
@@ -59,7 +66,7 @@ def extract_action(text: str) -> tuple[str, str | None]:
     Meaningful only when is_action_request(text); falls back to alert_line_lead."""
     m = _request_match(text or "")
     verb = next((g for g in (m.groups() if m else ()) if g), "alert").lower()
-    s = _STATION.search(text or "")
+    s = _STATION.search(_clean(text))
     return ("flag_for_rebalancing" if verb == "flag" else "alert_line_lead"), (f"S{s.group(1) or s.group(2)}" if s else None)
 
 
@@ -94,7 +101,7 @@ STATION_NOTE = "station set from your request"
 def named_stations(text: str) -> list[str]:
     """Station ids the user wrote, in order ('station 15' / 'S15' -> 'S15'), without duplicates."""
     out: list[str] = []
-    for m in _STATION.finditer(text or ""):
+    for m in _STATION.finditer(_clean(text)):
         sid = f"S{m.group(1) or m.group(2)}"
         if sid not in out:
             out.append(sid)

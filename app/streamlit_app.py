@@ -1,7 +1,6 @@
 """Demo UI. Tab 1: real line data (Bosch) + the supervisor agent. Tab 2: the camera -> events adapter."""
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sys
@@ -15,15 +14,21 @@ import pandas as pd  # noqa: E402  (ships with streamlit)
 import streamlit as st  # noqa: E402
 from langgraph.checkpoint.memory import MemorySaver  # noqa: E402
 
-from agent.graph import ask, build_agent  # noqa: E402
-from agent.report import generate_report  # noqa: E402
+from app.session_runtime import SessionRuntime  # noqa: E402
 from mcp_server import queries  # noqa: E402
 
 st.set_page_config(page_title="Line Supervisor Agent", layout="wide")
 
 
-def run(coro):
-    return asyncio.run(coro)
+def runtime() -> SessionRuntime:
+    """One persistent agent runtime per browser session: a single MCP subprocess, built once, reused by every chat turn and the report."""
+    rt = st.session_state.get("rt")
+    if rt is None or not rt.alive:                      # first use, or the subprocess died: (re)start
+        if rt is not None:
+            rt.close()
+        with st.spinner("Starting the agent (MCP server + data catalog)..."):
+            rt = st.session_state.rt = SessionRuntime().start()
+    return rt
 
 
 def _num(s: str) -> int:
@@ -109,7 +114,7 @@ with tab_bosch:
     st.divider()
     if st.button("Generate shift report", type="primary"):
         with st.spinner("Generating report (LLM writes the prose; numbers come from the tools)..."):
-            st.session_state.report = run(generate_report(shift, line, src))
+            st.session_state.report = runtime().report(shift, line, src)
     if st.session_state.get("report"):
         r1, r2 = st.tabs(["WhatsApp", "Markdown"])
         r1.code(st.session_state.report["whatsapp"], language=None)
@@ -119,9 +124,8 @@ with tab_bosch:
     st.subheader("Ask the supervisor agent")
     st.caption("Try: *Which station is the bottleneck?*  ·  *Which stations correlate with QC failures?*  ·  *Compare throughput between windows W2 and W6*  ·  *Alert the line lead about the bottleneck* (needs your approval)")
 
-    async def _ask(q=None, resume=None):
-        g = await build_agent(st.session_state.saver)
-        return await ask(g, q, st.session_state.thread, approve=None, resume=resume)
+    def _ask(q=None, resume=None):
+        return runtime().ask(q, st.session_state.saver, st.session_state.thread, resume=resume)
 
     def _handle(out: dict) -> None:
         st.session_state.pending = next((a for a in out["actions"] if a["status"] == "pending"), None)
@@ -141,13 +145,13 @@ with tab_bosch:
         for col, label, val in ((a1, "Approve", True), (a2, "Reject", False)):
             if col.button(label, key=f"{label}-{len(st.session_state.chat)}"):
                 with st.spinner("Resuming..."):
-                    _handle(run(_ask(resume=val)))
+                    _handle(_ask(resume=val))
                 st.rerun()
 
     if qtext := st.chat_input("Ask about this line, e.g. Which station is the bottleneck?", key="chat_bosch"):
         st.session_state.chat.append(("user", qtext, []))
         with st.spinner("Thinking..."):
-            _handle(run(_ask(q=f"[Context: source {src}, line {line}, window {shift}] {qtext}")))
+            _handle(_ask(q=f"[Context: source {src}, line {line}, window {shift}] {qtext}"))
         st.rerun()
 
 # ============================================================================== TAB 2

@@ -7,6 +7,7 @@ person approves.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -18,6 +19,7 @@ from typing import Literal
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.types import Command, interrupt
@@ -83,11 +85,62 @@ def mcp_client() -> MultiServerMCPClient:
 
 
 async def build_agent(checkpointer=None):
+    """Stateless variant (CLI, evals): the MCP client starts a fresh server process for the catalog call and for every tool call."""
     client = mcp_client()
     mcp_tools = await client.get_tools()
     by_name = {t.name: t for t in mcp_tools}
     cat = json.loads(_tool_text(await by_name["list_data_sources"].ainvoke({})))   # injected so the model needn't spend a call
-    system = SYSTEM.format(catalog=catalog_text(cat))
+    return _compile_graph(mcp_tools, by_name, SYSTEM.format(catalog=catalog_text(cat)), checkpointer)
+
+
+class AgentRuntime:
+    """One MCP server subprocess + one tool list + one catalog, shared by every turn of a Streamlit session.
+
+    The MCP session is opened and closed by a single background task (`_own`): anyio's stdio client must exit in the task that
+    entered it, while callers use the tools from any task. `graph(checkpointer)` is cheap (no I/O), so a fresh conversation is just
+    a new checkpointer/thread over the same subprocess."""
+
+    def __init__(self) -> None:
+        self.tools: dict = {}
+        self.system = ""
+        self._mcp_tools: list = []
+        self._stop: asyncio.Event | None = None
+        self._task: asyncio.Task | None = None
+
+    @classmethod
+    async def start(cls) -> "AgentRuntime":
+        rt = cls()
+        rt._stop = asyncio.Event()
+        ready: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        async def _own() -> None:
+            try:
+                async with mcp_client().session("metrics") as session:
+                    rt._mcp_tools = await load_mcp_tools(session, server_name="metrics")
+                    rt.tools = {t.name: t for t in rt._mcp_tools}
+                    cat = json.loads(_tool_text(await rt.tools["list_data_sources"].ainvoke({})))
+                    rt.system = SYSTEM.format(catalog=catalog_text(cat))
+                    ready.set_result(True)
+                    await rt._stop.wait()                       # hold the subprocess open until close()
+            except BaseException as e:                         # startup failure must reach the caller, not die in the task
+                if not ready.done():
+                    ready.set_exception(e)
+                else:
+                    raise
+        rt._task = asyncio.create_task(_own())
+        await ready
+        return rt
+
+    def graph(self, checkpointer=None):
+        return _compile_graph(self._mcp_tools, self.tools, self.system, checkpointer)
+
+    async def aclose(self) -> None:
+        if self._task and not self._task.done():
+            self._stop.set()
+            await self._task
+
+
+def _compile_graph(mcp_tools, by_name, system, checkpointer=None):
     llm = get_llm().bind_tools([*mcp_tools, propose_action])
 
     async def agent_node(state: MessagesState):
