@@ -111,7 +111,8 @@ def test_action_request_policy_yes_and_no_cases():
     from agent.policy import is_action_request as yes_
     for yes in ("Alert the line lead about station 15 on line 0.", "Alert the line lead about the bottleneck on line 0 in window W5.",
                 "Flag station S3 for rebalancing.", "please flag S7", "Can you escalate this?", "Could you flag S2 please?", "Notify the line lead",
-                "Find the bottleneck and then alert the line lead", "I want you to flag S2", "What is the bottleneck? Alert the line lead."):
+                "Find the bottleneck and then alert the line lead", "I want you to flag S2", "What is the bottleneck? Alert the line lead.",
+                "Would you alert the line lead?", "Would you please flag S3?"):
         assert yes_(yes), yes
     for no in ("Which station should I rebalance on line 0 in window W5?", "Should I alert the line lead?",
                "What would you recommend for the worst station on line 0 in window W5? Just advise me.",
@@ -119,7 +120,7 @@ def test_action_request_policy_yes_and_no_cases():
                # new false-positive classes
                "Should I rebalance S3 and flag it?", "Flag rate at S3?", "Warn me if S2 is slow", "Alert me when the queue grows",
                "Do not alert anyone, just tell me the bottleneck", "don't flag S3", "Is it worth flagging S2?", "What is the flag count at S3",
-               "Would you alert the line lead?", "Can I flag S2?"):
+               "Can I flag S2?"):
         assert not yes_(no), no
 
 
@@ -231,3 +232,46 @@ def test_mcp_roundtrip_and_validation(mini_db):
     assert bad_shift["error"] == "invalid_value" and bad_shift["valid_values"] == ["W1", "W2"]
     assert bad_line["error"] == "invalid_arguments" and bad_line["details"][0]["field"] == "line"
 
+
+
+def test_named_station_wins_over_the_models_choice():
+    import asyncio
+
+    from langchain_core.messages import AIMessage
+
+    from agent import policy as P
+
+    def prop(station, reason="queue is highest"):
+        return AIMessage(content="", tool_calls=[{"name": "propose_action", "id": "1", "type": "tool_call",
+                                                   "args": {"action": "alert_line_lead", "station_id": station, "reason": reason}}])
+    ask = "Alert the line lead about station 15 on line 0."
+    assert P.station_to_enforce(ask, "S2") == "S15" and P.station_to_enforce(ask, "15") is None and P.station_to_enforce(ask, "s15") is None
+    assert P.station_to_enforce("Alert the line lead about the bottleneck.", "S2") is None          # nothing named
+    assert P.station_to_enforce("Which station is S2?", "S9") is None                                # not an action request
+    assert P.station_to_enforce("Flag S2 and S3", "S3") is None                                      # any named station is fine
+
+    async def run(resp, retry):
+        calls = []
+
+        async def reprompt(nudge):
+            calls.append(nudge)
+            return retry
+        return await P.reconcile_station(ask, resp, reprompt), calls
+
+    # path 1: correct station already -> untouched, no re-prompt
+    out, calls = asyncio.run(run(prop("S15"), prop("S99")))
+    assert out.tool_calls[0]["args"]["station_id"] == "S15" and calls == []
+    # path 2: wrong station, the re-prompt fixes it -> the re-prompted reply is used, asked exactly once, reason untouched
+    out, calls = asyncio.run(run(prop("S2"), prop("S15", "named by user")))
+    assert out.tool_calls[0]["args"]["station_id"] == "S15" and len(calls) == 1 and "S15" in calls[0]
+    assert P.STATION_NOTE not in out.tool_calls[0]["args"]["reason"]
+    # path 3: still wrong after the re-prompt -> overwritten, and the approval reason says so
+    out, calls = asyncio.run(run(prop("S2"), prop("S7")))
+    a = out.tool_calls[0]["args"]
+    assert a["station_id"] == "S15" and len(calls) == 1 and a["reason"].endswith("(station set from your request)") and a["action"] == "alert_line_lead"
+    # path 4: the re-prompt dropped the proposal -> keep the original call, with the station overwritten
+    out, calls = asyncio.run(run(prop("S2"), AIMessage(content="sorry")))
+    assert out.tool_calls[0]["args"]["station_id"] == "S15" and "station set from your request" in out.tool_calls[0]["args"]["reason"]
+    # non-propose tool calls and replies without any call pass through
+    plain = AIMessage(content="text")
+    assert asyncio.run(run(plain, plain))[0] is plain

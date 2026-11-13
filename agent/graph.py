@@ -107,6 +107,8 @@ async def build_agent(checkpointer=None):
             if any(c["name"] == "propose_action" for c in (getattr(resp, "tool_calls", None) or [])):    # still insists: drop the call
                 keep = [c for c in resp.tool_calls if c["name"] != "propose_action"]
                 resp = AIMessage(content=resp.content or policy.BLOCK_FALLBACK, tool_calls=keep)
+        # the station the user named wins over the model's choice (it once proposed the bottleneck for "station 15")
+        resp = await policy.reconcile_station(text, resp, lambda n: llm.ainvoke([SystemMessage(system), *msgs, SystemMessage(n)]))
         return {"messages": [resp]}
 
     async def tools_node(state: MessagesState):
