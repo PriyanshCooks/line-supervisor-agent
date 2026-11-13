@@ -95,6 +95,18 @@ def test_outputs_name_their_statistic(mini_db):
     assert "MEAN" in q.compare_shifts("W1", "W2", "L0").stat
 
 
+def test_find_bottleneck_description_matches_the_queue_based_ranking():
+    """The tool description is what the model reads; it must not still advertise the old mean-dwell ranking."""
+    from mcp_server.server import mcp
+
+    async def desc():
+        async with fastmcp.Client(mcp) as c:
+            return next(t.description for t in await c.list_tools() if t.name == "find_bottleneck")
+    d = asyncio.run(desc()).lower()
+    assert "queue" in d and "highest mean dwell" not in d
+    assert "throughput" in d and "peak queue" in d and "ticks" in d and "refused=true" in d
+
+
 def test_action_request_detector_matches_imperatives_not_questions():
     from agent.graph import ACTION_REQUEST as R
     for yes in ("Alert the line lead about station 15 on line 0.", "please flag S7", "Can you escalate this?", "Notify the line lead",

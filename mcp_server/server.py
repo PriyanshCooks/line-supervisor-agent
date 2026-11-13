@@ -53,8 +53,9 @@ def get_station_metrics(station_id: str | int, shift: str | int, line: str | int
 
 @mcp.tool
 def find_bottleneck(shift: str | int, line: str | int | None = None, source: str | None = None) -> str:
-    """The station with the highest mean dwell among stations that have enough complete cycles, with evidence.
-    Needs >= 30 complete cycles per station. Returns refused=true (and no station) when the data lacks complete cycles: never name a station in that case."""
+    """The station with the longest average queue (time-averaged parts waiting between entering the station and entering the next one) in one window, with evidence.
+    Reports throughput (parts per window), peak queue and median dwell in ticks (1 tick = 0.01 time units) alongside; mean dwell is not the ranking key because Bosch timestamps have 0.01 resolution.
+    Only stations with >= 30 complete cycles covering >= 50% of their visits are eligible. Returns refused=true (and no station) when none qualifies: never name a station in that case."""
     return _run(LineArgs, {"shift": shift, "line": line, "source": source}, queries.find_bottleneck)
 
 
