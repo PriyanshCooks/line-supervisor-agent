@@ -1,3 +1,5 @@
+# Agent, MCP tools, Streamlit app, ingest, evals and unit tests. No torch / ultralytics / OpenCV needed.
+# Optional camera adapter: pip install -r requirements-vision.txt
 fastmcp==2.14.7
 mcp==1.30.0
 langgraph==1.2.20
@@ -5,14 +7,7 @@ langchain-core==1.8.0
 langchain-ollama==1.1.0
 langchain-mcp-adapters==0.3.1
 pydantic==2.14.3
-PyYAML==6.0.3
 numpy==2.4.6
 pandas==3.1.1
-opencv-python-headless==5.0.0.93
 streamlit==1.67.0
 pytest==9.2.0
-ultralytics==8.4.211
-torch==2.15.0
-torchvision==0.29.2
-lapx==0.13.1
-imageio-ffmpeg==0.8.1

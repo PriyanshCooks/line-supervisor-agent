@@ -19,13 +19,16 @@
 
 ```bash
 python -m venv .venv && source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -r requirements.txt && ollama pull qwen3.5:4b
+pip install -r requirements.txt && ollama pull qwen3.5:4b   # agent, MCP tools, Streamlit app, tests (no torch / OpenCV)
+pip install -r requirements-vision.txt                      # OPTIONAL: camera adapter only (adds torch, ultralytics, OpenCV, ffmpeg)
 python tasks.py ingest        # real Bosch data in data/bosch/ (see docs/DATA.md); or: python tasks.py sample (dev sample)
-python tasks.py vision        # optional: camera clip -> events + blurred annotated video
+python tasks.py vision        # optional (needs requirements-vision.txt): camera clip -> events + blurred annotated video
 python tasks.py app           # Streamlit demo.  Also: python tasks.py test | eval | report W5 L0   (or make <task>)
 ```
 
 `tasks.py` is a cross-platform runner (Windows has no `make`); the `Makefile` wraps it.
+
+The Bosch tab, the MCP tools, the agent, the evals and the unit tests need only `requirements.txt`; the Vision tab just reads events and a finished video from disk, so it also loads without the extras (it then shows a hint instead of the clip). The vision pipeline itself (`python tasks.py vision`) needs `requirements-vision.txt` and says so if it is missing.
 
 ## Architecture
 
@@ -112,3 +115,7 @@ Run-to-run variance is real, and this is the **fifth** real-data run: earlier ru
 2. **Continuous camera ingestion** into the same schema, per-line baselines, and drift alerts instead of window comparisons.
 3. **Context beyond one line:** multi-line flow (the supervisor says "line 3 is starved because line 2's output dropped"), shift calendars, maintenance events.
 4. **Alerting that earns trust:** proactive WhatsApp alerts with approval flows and an audit log of what was suggested, approved and what happened next; an eval set built from real supervisor questions.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Copyright (c) 2026 Priyansh Bhatt. The Bosch data is not part of this repository and remains under Kaggle's competition terms.

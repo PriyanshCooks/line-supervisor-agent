@@ -170,7 +170,7 @@ with tab_vision:
             st.video(str(vid), loop=True, autoplay=True, muted=True)
             st.caption("People are blurred in all outputs. Zones S1-S3 are the three nearest conveyor fixtures; the legend shows live enter/leave counts.")
         else:
-            st.info("No annotated clip yet. Run `python tasks.py vision` (needs data/input_stable.mp4).")
+            st.info("No annotated clip yet. Run `python tasks.py vision` (needs data/input_stable.mp4 and `pip install -r requirements-vision.txt`).")
     with cr:
         if vcat:
             ev = queries.station_events(source="vision", limit=100)
@@ -185,7 +185,7 @@ with tab_vision:
             b = queries.find_bottleneck("CLIP", "CAM1", "vision")
             st.info("find_bottleneck on this clip -> **refused**: " + (b.reason or "") if b.refused else f"bottleneck {b.station}")
         else:
-            st.info("No vision events in the shared table yet. Run `python tasks.py vision`.")
+            st.info("No vision events in the shared table yet. Run `python tasks.py vision` (optional extras: `pip install -r requirements-vision.txt`).")
     st.markdown("**What this proves:** the adapter emits the same schema as the production data, so the same MCP tools and agent work on camera "
                 "events. **What it does not prove:** throughput or cycle times: one hand-off in 17 s gives no complete cycle. On a fixed CCTV "
                 "feed the same code would emit continuous events. Ask the agent from tab 1: *What happened at the stations in the camera clip?*")
