@@ -12,12 +12,16 @@ sys.path.insert(0, str(ROOT))
 
 import pandas as pd  # noqa: E402  (ships with streamlit)
 import streamlit as st  # noqa: E402
+import altair as alt  # noqa: E402  (ships with streamlit)
 from langgraph.checkpoint.memory import MemorySaver  # noqa: E402
 
 from app.session_runtime import SessionRuntime  # noqa: E402
 from mcp_server import queries  # noqa: E402
 
 st.set_page_config(page_title="Line Supervisor Agent", layout="wide")
+
+
+OUTLIER_LIFT = 3.0        # QC chart: stations failing at >= this multiple of the line baseline are highlighted
 
 
 def runtime() -> SessionRuntime:
@@ -73,7 +77,8 @@ with tab_bosch:
     m1.metric("Line output (units)", f"{summ.line_output:,}")
     m2.metric("Bottleneck", "none (refused)" if bn.refused else bn.station)
     m3.metric("Avg parts in queue at bottleneck", "-" if bn.refused else f"{bn.avg_queue:.3f}")
-    m4.metric("Line QC failure baseline", "-" if rk.line_baseline_rate is None else f"{100 * rk.line_baseline_rate:.1f}%")
+    m4.metric("Line QC failure baseline", "-" if rk.line_baseline_rate is None else f"{100 * rk.line_baseline_rate:.2f}%")
+    st.caption("Line output = units reaching the line's last station in this window; station throughput counts every entry at that station, so it is much larger.")
 
     left, right = st.columns(2)
     with left:
@@ -96,12 +101,28 @@ with tab_bosch:
     with right:
         st.subheader("QC failure by station")
         if rk.stations:
-            q = pd.DataFrame([{"station": r.station, "failure rate": r.failure_rate, "units": r.parts, "lift vs line": r.lift} for r in rk.stations]).set_index("station")
-            st.bar_chart(q["failure rate"].reset_index(), x="station", y="failure rate", sort="-failure rate", height=240,
-                         x_label="station (highest failure rate first)", y_label="failure rate")
-            st.dataframe(q.style.format({"failure rate": "{:.1%}", "lift vs line": "{:.2f}x"}), width="stretch")
+            base = rk.line_baseline_rate or 0.0
+            q = pd.DataFrame([{"station": r.station, "failure rate": r.failure_rate, "lift vs line": r.lift, "units": r.parts} for r in rk.stations]).set_index("station")
+            hot = q["lift vs line"].fillna(0) >= OUTLIER_LIFT                 # display only: the numbers are the tool's, unchanged
+            qc = q.reset_index().rename(columns={"failure rate": "failure_rate", "lift vs line": "lift"})
+            qc["outlier"] = hot.to_numpy()
+            order = qc.sort_values("failure_rate", ascending=False)["station"].tolist()      # explicit: highest failure rate first
+            ymax = max(float(qc["failure_rate"].max()), OUTLIER_LIFT * base) * 1.18          # headroom for the lift label above the tallest bar
+            qc["lift_label"] = qc["lift"].map(lambda v: "" if pd.isna(v) else f"{v:.1f}x")
+            bars = alt.Chart(qc).mark_bar().encode(
+                x=alt.X("station:N", sort=order, title="station (highest failure rate first)"),
+                y=alt.Y("failure_rate:Q", title="failure rate", axis=alt.Axis(format="%"), scale=alt.Scale(domain=[0, ymax])),
+                color=alt.condition(alt.datum.outlier, alt.value("#d62728"), alt.value("#6fa8ff")),
+                tooltip=["station", alt.Tooltip("failure_rate:Q", format=".2%"), alt.Tooltip("lift:Q", format=".1f"), "units"])
+            labels = alt.Chart(qc[qc["outlier"]]).mark_text(dy=-7, fontWeight="bold").encode(
+                x=alt.X("station:N", sort=order), y=alt.Y("failure_rate:Q", scale=alt.Scale(domain=[0, ymax])), text="lift_label:N", color=alt.value("#d62728"))
+            threshold = alt.Chart(pd.DataFrame({"y": [OUTLIER_LIFT * base]})).mark_rule(strokeDash=[4, 4], color="#999").encode(y=alt.Y("y:Q", scale=alt.Scale(domain=[0, ymax])))
+            st.altair_chart((bars + labels + threshold).properties(height=240), width="stretch")
+            st.dataframe(q.style.format({"failure rate": "{:.2%}", "lift vs line": "{:.1f}x"}, na_rep="-").apply(
+                lambda r: ["background-color:#ffd6d6;color:#000"] * len(r) if hot[r.name] else [""] * len(r), axis=1), width="stretch")
             st.caption("Failure = the whole part's Response=1, so this shows association with passing a station, not proof of cause. "
-                       f"Line baseline {100 * (rk.line_baseline_rate or 0):.1f}%.")
+                       f"Whole line (not the selected window); line baseline {100 * base:.2f}%. "
+                       f"Red = at least {OUTLIER_LIFT:g}x the baseline (dashed line); the label is the lift.")
         else:
             st.info("No QC labels available for this line.")
         if not bn.refused:

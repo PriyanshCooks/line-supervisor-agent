@@ -10,9 +10,10 @@
 
 | | |
 |---|---|
-| ![Bosch tab](docs/img/tab1_bosch.jpg) **Bosch tab:** line output, bottleneck (average queue), throughput / queue / median-dwell-in-ticks table, QC failure by station | ![Report and chat](docs/img/report_and_chat.jpg) **Shift report + chat** (numbers from the tools; LLM writes two sentences) |
-| ![Approval](docs/img/chat_approval_pending.jpg) **Human approval:** `alert_line_lead -> S2` waits for Approve/Reject; nothing is logged until approved | ![Rejected](docs/img/chat_rejected.jpg) **Rejected:** nothing executed, the agent offers alternatives |
-| ![Vision tab](docs/img/tab2_vision.jpg) **Vision tab:** camera clip -> same event schema, people blurred | ![Frames](docs/img/vision_start_middle_end.jpg) Start / middle / end frames (blurred) |
+| ![Bosch tab](docs/img/tab1_bosch.jpg) **Bosch tab:** line output, bottleneck (average queue), throughput / queue / median-dwell-in-ticks table, QC failure by station | ![QC outlier on L3](docs/img/qc_outlier_l3_s32.jpg) Real Bosch data: L3 S32 fails QC at 4.78%, 8.4x the line baseline (an association, not a cause). |
+| ![Report and chat](docs/img/report_and_chat.jpg) **Shift report + chat** (numbers from the tools; LLM writes two sentences) | ![Approval](docs/img/chat_approval_pending.jpg) **Human approval:** `alert_line_lead -> S2` waits for Approve/Reject; nothing is logged until approved |
+| ![Rejected](docs/img/chat_rejected.jpg) **Rejected:** nothing executed, the agent offers alternatives | ![Vision tab](docs/img/tab2_vision.jpg) **Vision tab:** camera clip -> same event schema, people blurred |
+| ![Frames](docs/img/vision_start_middle_end.jpg) Start / middle / end frames (blurred) | |
 
 ## Quickstart
 
