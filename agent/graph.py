@@ -7,6 +7,7 @@ person approves.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -18,17 +19,15 @@ from typing import Literal
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.types import Command, interrupt
 
-from agent import tracing
+from agent import policy, tracing
 from agent.llm import get_llm
 
 ROOT = Path(__file__).resolve().parents[1]
-# an imperative request to alert/flag someone ("Alert the line lead...", "Can you flag S7?"), not a question about whether to
-_V = r"(alert|notify|escalate|flag|warn|page)"
-ACTION_REQUEST = re.compile(rf"^\s*(please\s+)?{_V}\b|\b(can|could|would|will) you (please )?{_V}\b|\b(please|go ahead and|i want you to|i need you to|then|and)\s+{_V}\b", re.I)
 ACTION_LOG = ROOT / "data" / "actions.log"
 
 SYSTEM = """You are a manufacturing line-supervisor assistant. Production data is only reachable through your tools.
@@ -86,42 +85,83 @@ def mcp_client() -> MultiServerMCPClient:
 
 
 async def build_agent(checkpointer=None):
+    """Stateless variant (CLI, evals): the MCP client starts a fresh server process for the catalog call and for every tool call."""
     client = mcp_client()
     mcp_tools = await client.get_tools()
     by_name = {t.name: t for t in mcp_tools}
     cat = json.loads(_tool_text(await by_name["list_data_sources"].ainvoke({})))   # injected so the model needn't spend a call
-    system = SYSTEM.format(catalog=catalog_text(cat))
+    return _compile_graph(mcp_tools, by_name, SYSTEM.format(catalog=catalog_text(cat)), checkpointer)
+
+
+class AgentRuntime:
+    """One MCP server subprocess + one tool list + one catalog, shared by every turn of a Streamlit session.
+
+    The MCP session is opened and closed by a single background task (`_own`): anyio's stdio client must exit in the task that
+    entered it, while callers use the tools from any task. `graph(checkpointer)` is cheap (no I/O), so a fresh conversation is just
+    a new checkpointer/thread over the same subprocess."""
+
+    def __init__(self) -> None:
+        self.tools: dict = {}
+        self.system = ""
+        self._mcp_tools: list = []
+        self._stop: asyncio.Event | None = None
+        self._task: asyncio.Task | None = None
+
+    @classmethod
+    async def start(cls) -> "AgentRuntime":
+        rt = cls()
+        rt._stop = asyncio.Event()
+        ready: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        async def _own() -> None:
+            try:
+                async with mcp_client().session("metrics") as session:
+                    rt._mcp_tools = await load_mcp_tools(session, server_name="metrics")
+                    rt.tools = {t.name: t for t in rt._mcp_tools}
+                    cat = json.loads(_tool_text(await rt.tools["list_data_sources"].ainvoke({})))
+                    rt.system = SYSTEM.format(catalog=catalog_text(cat))
+                    ready.set_result(True)
+                    await rt._stop.wait()                       # hold the subprocess open until close()
+            except BaseException as e:                         # startup failure must reach the caller, not die in the task
+                if not ready.done():
+                    ready.set_exception(e)
+                else:
+                    raise
+        rt._task = asyncio.create_task(_own())
+        await ready
+        return rt
+
+    def graph(self, checkpointer=None):
+        return _compile_graph(self._mcp_tools, self.tools, self.system, checkpointer)
+
+    async def aclose(self) -> None:
+        if self._task and not self._task.done():
+            self._stop.set()
+            await self._task
+
+
+def _compile_graph(mcp_tools, by_name, system, checkpointer=None):
     llm = get_llm().bind_tools([*mcp_tools, propose_action])
 
     async def agent_node(state: MessagesState):
         msgs = state["messages"]
         resp = await llm.ainvoke([SystemMessage(system), *msgs])
-        # Guard: an imperative alert/flag request must end in a propose_action call (the gated tool), never in prose.
-        # Found on real data: "Alert the line lead about station 15..." was answered with a metrics analysis and no proposal.
+        # Action policy (rules and phrasing live in agent/policy.py; both directions found by the real-data eval):
+        #   force: "Alert the line lead about station 15" was once answered with a metrics analysis and no proposal
+        #   block: "Which station should I rebalance...?" once made the 4B model call propose_action unprompted (1 of 16)
         turn = msgs[max((i for i, m in enumerate(msgs) if isinstance(m, HumanMessage)), default=0):]
-        asked = turn and ACTION_REQUEST.search(_tool_text(turn[0].content))
+        text = _tool_text(turn[0].content) if turn else ""
         called = any(c["name"] == "propose_action" for m in turn if isinstance(m, AIMessage) for c in m.tool_calls)
-        if asked and not called and not getattr(resp, "tool_calls", None):
-            text = _tool_text(turn[0].content)
-            act = "flag_for_rebalancing" if re.match(r"\s*(please\s+)?flag\b", text, re.I) or re.search(r"\byou (please )?flag\b", text, re.I) else "alert_line_lead"
-            m = re.search(r"\bstation\s*S?(\d+)\b|\bS(\d+)\b", text, re.I)
-            where = (f"station_id='S{m.group(1) or m.group(2)}'" if m else
-                     "the station id returned by find_bottleneck (call it first if you do not have it)")
-            nudge = SystemMessage(f"The user asked you to alert/flag/escalate. Do not analyse further and do not answer in text: "
-                                  f"call the propose_action tool NOW with action='{act}' and {where}, and a one-sentence reason "
-                                  "taken from the tool results.")
-            resp = await llm.ainvoke([SystemMessage(system), *msgs, nudge])
-        # Policy (the other direction): propose_action only when THIS user message asks for an alert/flag. Found in the real-data
-        # eval: "Which station should I rebalance...?" made the 4B model call propose_action unprompted (1 of 16 non-action
-        # questions), after 0 of 16 in earlier runs. The approval gate would have caught it; this stops it reaching the gate.
-        if not asked and any(c["name"] == "propose_action" for c in (getattr(resp, "tool_calls", None) or [])):
-            nudge = SystemMessage("The user did NOT ask you to alert or flag anyone. Do not call propose_action. Answer in text only: "
-                                  "give the metrics from the tools and describe any suggested action in words.")
-            resp = await llm.ainvoke([SystemMessage(system), *msgs, nudge])
+        names = [c["name"] for c in (getattr(resp, "tool_calls", None) or [])]
+        if policy.should_force_action(text, called, bool(names)):
+            resp = await llm.ainvoke([SystemMessage(system), *msgs, SystemMessage(policy.force_nudge(text))])
+        elif policy.should_block_action(text, names):
+            resp = await llm.ainvoke([SystemMessage(system), *msgs, SystemMessage(policy.BLOCK_NUDGE)])
             if any(c["name"] == "propose_action" for c in (getattr(resp, "tool_calls", None) or [])):    # still insists: drop the call
                 keep = [c for c in resp.tool_calls if c["name"] != "propose_action"]
-                resp = AIMessage(content=resp.content or "I can suggest an action in words; tell me if you want me to alert the line lead "
-                                 "or flag a station (that needs your approval).", tool_calls=keep)
+                resp = AIMessage(content=resp.content or policy.BLOCK_FALLBACK, tool_calls=keep)
+        # the station the user named wins over the model's choice (it once proposed the bottleneck for "station 15")
+        resp = await policy.reconcile_station(text, resp, lambda n: llm.ainvoke([SystemMessage(system), *msgs, SystemMessage(n)]))
         return {"messages": [resp]}
 
     async def tools_node(state: MessagesState):

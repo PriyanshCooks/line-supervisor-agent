@@ -1,0 +1,9 @@
+-r requirements.txt
+# Optional extras for the camera adapter (python tasks.py vision): person blur + station-zone events from video.
+ultralytics==8.4.211
+torch==2.15.0
+torchvision==0.29.2
+lapx==0.13.1
+opencv-python-headless==5.0.0.93
+imageio-ffmpeg==0.8.1
+PyYAML==6.0.3

@@ -30,6 +30,13 @@ def main() -> int:
         print(__doc__)
         return 2
     task, extra = sys.argv[1], sys.argv[2:]
+    if task == "vision":                                    # the camera adapter needs the optional extras
+        import importlib.util
+        missing = [m for m in ("cv2", "ultralytics", "torch", "yaml") if importlib.util.find_spec(m) is None]
+        if missing:
+            print(f"The camera adapter needs extra packages ({', '.join(missing)} missing). Install them with:\n"
+                  "    pip install -r requirements-vision.txt")
+            return 1
     if task == "sample":
         rc = subprocess.call([PY, "-m", "ingest.make_dev_sample", *extra])
         return rc or subprocess.call([PY, "-m", "ingest.bosch", "--data-dir", "data/bosch_sample", "--source", "synthetic"])

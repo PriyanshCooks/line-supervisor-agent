@@ -1,7 +1,6 @@
 """Demo UI. Tab 1: real line data (Bosch) + the supervisor agent. Tab 2: the camera -> events adapter."""
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sys
@@ -13,17 +12,27 @@ sys.path.insert(0, str(ROOT))
 
 import pandas as pd  # noqa: E402  (ships with streamlit)
 import streamlit as st  # noqa: E402
+import altair as alt  # noqa: E402  (ships with streamlit)
 from langgraph.checkpoint.memory import MemorySaver  # noqa: E402
 
-from agent.graph import ask, build_agent  # noqa: E402
-from agent.report import generate_report  # noqa: E402
+from app.session_runtime import SessionRuntime  # noqa: E402
 from mcp_server import queries  # noqa: E402
 
 st.set_page_config(page_title="Line Supervisor Agent", layout="wide")
 
 
-def run(coro):
-    return asyncio.run(coro)
+OUTLIER_LIFT = 3.0        # QC chart: stations failing at >= this multiple of the line baseline are highlighted
+
+
+def runtime() -> SessionRuntime:
+    """One persistent agent runtime per browser session: a single MCP subprocess, built once, reused by every chat turn and the report."""
+    rt = st.session_state.get("rt")
+    if rt is None or not rt.alive:                      # first use, or the subprocess died: (re)start
+        if rt is not None:
+            rt.close()
+        with st.spinner("Starting the agent (MCP server + data catalog)..."):
+            rt = st.session_state.rt = SessionRuntime().start()
+    return rt
 
 
 def _num(s: str) -> int:
@@ -68,7 +77,8 @@ with tab_bosch:
     m1.metric("Line output (units)", f"{summ.line_output:,}")
     m2.metric("Bottleneck", "none (refused)" if bn.refused else bn.station)
     m3.metric("Avg parts in queue at bottleneck", "-" if bn.refused else f"{bn.avg_queue:.3f}")
-    m4.metric("Line QC failure baseline", "-" if rk.line_baseline_rate is None else f"{100 * rk.line_baseline_rate:.1f}%")
+    m4.metric("Line QC failure baseline", "-" if rk.line_baseline_rate is None else f"{100 * rk.line_baseline_rate:.2f}%")
+    st.caption("Line output = units reaching the line's last station in this window; station throughput counts every entry at that station, so it is much larger.")
 
     left, right = st.columns(2)
     with left:
@@ -91,12 +101,28 @@ with tab_bosch:
     with right:
         st.subheader("QC failure by station")
         if rk.stations:
-            q = pd.DataFrame([{"station": r.station, "failure rate": r.failure_rate, "units": r.parts, "lift vs line": r.lift} for r in rk.stations]).set_index("station")
-            st.bar_chart(q["failure rate"].reset_index(), x="station", y="failure rate", sort="-failure rate", height=240,
-                         x_label="station (highest failure rate first)", y_label="failure rate")
-            st.dataframe(q.style.format({"failure rate": "{:.1%}", "lift vs line": "{:.2f}x"}), width="stretch")
+            base = rk.line_baseline_rate or 0.0
+            q = pd.DataFrame([{"station": r.station, "failure rate": r.failure_rate, "lift vs line": r.lift, "units": r.parts} for r in rk.stations]).set_index("station")
+            hot = q["lift vs line"].fillna(0) >= OUTLIER_LIFT                 # display only: the numbers are the tool's, unchanged
+            qc = q.reset_index().rename(columns={"failure rate": "failure_rate", "lift vs line": "lift"})
+            qc["outlier"] = hot.to_numpy()
+            order = qc.sort_values("failure_rate", ascending=False)["station"].tolist()      # explicit: highest failure rate first
+            ymax = max(float(qc["failure_rate"].max()), OUTLIER_LIFT * base) * 1.18          # headroom for the lift label above the tallest bar
+            qc["lift_label"] = qc["lift"].map(lambda v: "" if pd.isna(v) else f"{v:.1f}x")
+            bars = alt.Chart(qc).mark_bar().encode(
+                x=alt.X("station:N", sort=order, title="station (highest failure rate first)"),
+                y=alt.Y("failure_rate:Q", title="failure rate", axis=alt.Axis(format="%"), scale=alt.Scale(domain=[0, ymax])),
+                color=alt.condition(alt.datum.outlier, alt.value("#d62728"), alt.value("#6fa8ff")),
+                tooltip=["station", alt.Tooltip("failure_rate:Q", format=".2%"), alt.Tooltip("lift:Q", format=".1f"), "units"])
+            labels = alt.Chart(qc[qc["outlier"]]).mark_text(dy=-7, fontWeight="bold").encode(
+                x=alt.X("station:N", sort=order), y=alt.Y("failure_rate:Q", scale=alt.Scale(domain=[0, ymax])), text="lift_label:N", color=alt.value("#d62728"))
+            threshold = alt.Chart(pd.DataFrame({"y": [OUTLIER_LIFT * base]})).mark_rule(strokeDash=[4, 4], color="#999").encode(y=alt.Y("y:Q", scale=alt.Scale(domain=[0, ymax])))
+            st.altair_chart((bars + labels + threshold).properties(height=240), width="stretch")
+            st.dataframe(q.style.format({"failure rate": "{:.2%}", "lift vs line": "{:.1f}x"}, na_rep="-").apply(
+                lambda r: ["background-color:#ffd6d6;color:#000"] * len(r) if hot[r.name] else [""] * len(r), axis=1), width="stretch")
             st.caption("Failure = the whole part's Response=1, so this shows association with passing a station, not proof of cause. "
-                       f"Line baseline {100 * (rk.line_baseline_rate or 0):.1f}%.")
+                       f"Whole line (not the selected window); line baseline {100 * base:.2f}%. "
+                       f"Red = at least {OUTLIER_LIFT:g}x the baseline (dashed line); the label is the lift.")
         else:
             st.info("No QC labels available for this line.")
         if not bn.refused:
@@ -109,7 +135,7 @@ with tab_bosch:
     st.divider()
     if st.button("Generate shift report", type="primary"):
         with st.spinner("Generating report (LLM writes the prose; numbers come from the tools)..."):
-            st.session_state.report = run(generate_report(shift, line, src))
+            st.session_state.report = runtime().report(shift, line, src)
     if st.session_state.get("report"):
         r1, r2 = st.tabs(["WhatsApp", "Markdown"])
         r1.code(st.session_state.report["whatsapp"], language=None)
@@ -119,9 +145,8 @@ with tab_bosch:
     st.subheader("Ask the supervisor agent")
     st.caption("Try: *Which station is the bottleneck?*  ·  *Which stations correlate with QC failures?*  ·  *Compare throughput between windows W2 and W6*  ·  *Alert the line lead about the bottleneck* (needs your approval)")
 
-    async def _ask(q=None, resume=None):
-        g = await build_agent(st.session_state.saver)
-        return await ask(g, q, st.session_state.thread, approve=None, resume=resume)
+    def _ask(q=None, resume=None):
+        return runtime().ask(q, st.session_state.saver, st.session_state.thread, resume=resume)
 
     def _handle(out: dict) -> None:
         st.session_state.pending = next((a for a in out["actions"] if a["status"] == "pending"), None)
@@ -141,13 +166,13 @@ with tab_bosch:
         for col, label, val in ((a1, "Approve", True), (a2, "Reject", False)):
             if col.button(label, key=f"{label}-{len(st.session_state.chat)}"):
                 with st.spinner("Resuming..."):
-                    _handle(run(_ask(resume=val)))
+                    _handle(_ask(resume=val))
                 st.rerun()
 
     if qtext := st.chat_input("Ask about this line, e.g. Which station is the bottleneck?", key="chat_bosch"):
         st.session_state.chat.append(("user", qtext, []))
         with st.spinner("Thinking..."):
-            _handle(run(_ask(q=f"[Context: source {src}, line {line}, window {shift}] {qtext}")))
+            _handle(_ask(q=f"[Context: source {src}, line {line}, window {shift}] {qtext}"))
         st.rerun()
 
 # ============================================================================== TAB 2
@@ -166,7 +191,7 @@ with tab_vision:
             st.video(str(vid), loop=True, autoplay=True, muted=True)
             st.caption("People are blurred in all outputs. Zones S1-S3 are the three nearest conveyor fixtures; the legend shows live enter/leave counts.")
         else:
-            st.info("No annotated clip yet. Run `python tasks.py vision` (needs data/input_stable.mp4).")
+            st.info("No annotated clip yet. Run `python tasks.py vision` (needs data/input_stable.mp4 and `pip install -r requirements-vision.txt`).")
     with cr:
         if vcat:
             ev = queries.station_events(source="vision", limit=100)
@@ -181,7 +206,7 @@ with tab_vision:
             b = queries.find_bottleneck("CLIP", "CAM1", "vision")
             st.info("find_bottleneck on this clip -> **refused**: " + (b.reason or "") if b.refused else f"bottleneck {b.station}")
         else:
-            st.info("No vision events in the shared table yet. Run `python tasks.py vision`.")
+            st.info("No vision events in the shared table yet. Run `python tasks.py vision` (optional extras: `pip install -r requirements-vision.txt`).")
     st.markdown("**What this proves:** the adapter emits the same schema as the production data, so the same MCP tools and agent work on camera "
                 "events. **What it does not prove:** throughput or cycle times: one hand-off in 17 s gives no complete cycle. On a fixed CCTV "
                 "feed the same code would emit continuous events. Ask the agent from tab 1: *What happened at the stations in the camera clip?*")
