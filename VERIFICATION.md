@@ -47,7 +47,30 @@ I interpreted "rank by throughput and parts in queue" as: rank by queue, report 
 
 **7. LLM on the RTX 3050 (4 GB).** Ollama's automatic split put only ~50% of qwen3.5:4b on the GPU (`ollama ps`: 48%/52% CPU/GPU, ~10 tokens/s); CPU only: 6.4 tokens/s; forcing all layers (`num_gpu=99`, now the default in `agent/llm.py`, env `OLLAMA_NUM_GPU`) with `num_ctx=8192` (default 4096 can truncate tool output): `ollama ps` 100% GPU, **~19 tokens/s, i.e. the same as the AMD iGPU earlier**, so the 3050 gave ~2x over Ollama's default but no gain over the iGPU because its 4 GB barely holds the model plus vision encoder. Caveat: `nvidia-smi` showed only ~870 MiB used and low utilisation during these runs while Ollama reported 100% GPU; I could not reconcile that (Windows hybrid-GPU reporting?), so GPU placement rests on Ollama's own report and the speed change. Chat answers still take 30-100 s because each question is 2-4 LLM calls over ~1-3k-token prompts.
 
-**Still not verified / not done:** the demo video and GIF (placeholders in the README); Docker Compose; Langfuse; Anthropic/OpenAI providers; the dev-sample sections below were not regenerated and use the old mean-dwell definition.
+**Still not verified / not done:** the demo video and GIF (not made; the broken placeholders were removed from the README); Docker Compose; Langfuse; Anthropic/OpenAI providers; the dev-sample sections below were not regenerated and use the old mean-dwell definition.
+
+## 0c. LATEST RUN, after the session-runtime, action-policy and requirements changes (real Bosch data, n=18)
+
+```
+$ python tasks.py eval          (qwen3.5:4b on the RTX 3050, 13 min 19 s)
+ tool-selection accuracy: 100%   answer correctness: 100%   unprompted-action rate: 0% (0/16)   (n=18)
+```
+
+Compared with the previous run (0b.6: 100% / 94% / 0 of 16, 12 min 11 s) nothing regressed; `fail_station` passed this time (the model did not add a window to the question) and was the only difference. Nothing relevant changed in between, so this is run-to-run variance, and the README now reports the range over these two runs: tool selection 100%, answer correctness 94-100%, unprompted actions 0/16. Per-question table of this run: [`evals/RESULTS.md`](evals/RESULTS.md), generated from the raw `data/out/eval_results.json` by `python -m evals.summarize` (the question text is rebuilt from `evals/cases.py` and the pandas ground truth; the model name and date are not stored in the JSON, so they come from the CLI/environment and the file's modification time). The failure-reason column was also exercised on the earlier runs' JSON files (a wrong-window `fail_station` answer and the 1-of-16 unprompted proposal render as expected). The eval calls `build_agent()` directly, so it does not cover the Streamlit path (persistent runtime, `[Context: ...]`-prefixed messages); that path was covered by the policy tests and the browser run (0b.3 and below).
+
+**Agent built once per Streamlit session** (one background event loop + one MCP server process per browser session, instead of `asyncio.run(build_agent())` every turn). Same question ("Which station is the bottleneck?", L0 W5), 3 turns, same conversation:
+
+```
+          turn 1   turn 2   turn 3   MCP server starts
+before    24.0 s   14.3 s   15.0 s   7     (~10 s setup per turn + ~5 s per tool call; LLM ~4.5 s)
+after     11.7 s    4.0 s    4.0 s   1     (4.6 s once, then LLM only)
+```
+
+The shift report went from 43-52 s to 20 s. In the browser on real data: chat, approve (action log written only after the click), reject (no log line), an L0 -> L3 switch (chat cleared, same server, S30) and the report all worked; one MCP server (launcher + interpreter = 2 processes) throughout and none left after closing a session, after the tests, or after stopping Streamlit. Caveat: turns 2 and 3 answered from the conversation history without a tool call, in both versions, so only turn 1 includes a tool call. Not exercised: recovery after the MCP subprocess is killed.
+
+**Policy fixes found along the way:** the app prefixes every question with `[Context: source ..., line ..., window ...]` and the imperative checks anchored at the start of the message, so every alert request from the UI would have been judged "not a request" and blocked (my regression; fixed by stripping the prefix, tested); `"would you <verb>"` counts as a request; a station the user names overrides the model's choice (re-prompt once, then overwrite with "station set from your request" in the approval reason). Live check: "Alert the line lead about station 15 on line 0." -> approval card on S15 (it was S2 before). The overwrite branch itself is covered by a unit test only; the live runs did not need it.
+
+**Requirements split verified in a fresh venv:** `requirements.txt` only (143 packages, none of torch/torchvision/ultralytics/OpenCV/lapx/imageio-ffmpeg): all 39 unit tests pass and the Streamlit app renders both tabs with no exceptions on the real data, without importing any vision module; `python tasks.py vision` there prints the `pip install -r requirements-vision.txt` hint. The vision pipeline itself was not re-run after the split (its dependencies are unchanged).
 
 ## 1. Unit tests
 
